@@ -1,3 +1,7 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
 type RecognitionResult = {
   isFinal: boolean;
   0?: { transcript?: string };
@@ -66,12 +70,177 @@ export function createRecognizer(handlers: {
   return recognizer;
 }
 
-export function speakEnglish(text: string): boolean {
-  if (typeof window === "undefined" || !window.speechSynthesis) return false;
-  window.speechSynthesis.cancel();
-  const utterance = new SpeechSynthesisUtterance(text);
+export type VoiceLike = {
+  lang: string;
+  name?: string;
+};
+
+const NO_SPEECH =
+  "Trình duyệt này không đọc được tiếng Anh. Hãy đọc theo chữ trên màn hình.";
+const SPEAK_FAILED =
+  "Không phát được giọng đọc. Hãy thử lại, hoặc đọc theo chữ trên màn hình.";
+
+/**
+ * Prefer a US English voice, then British English, then any English voice.
+ * An empty list is fine: callers still speak with utterance.lang.
+ */
+export function pickEnglishVoice<T extends VoiceLike>(voices: readonly T[]): T | null {
+  const english = voices.filter((voice) => voice.lang.toLowerCase().startsWith("en"));
+  const exact = (lang: string) => english.find((voice) => voice.lang.toLowerCase() === lang);
+  const prefix = (lang: string) =>
+    english.find((voice) => voice.lang.toLowerCase().startsWith(`${lang}-`) || voice.lang.toLowerCase().startsWith(lang));
+  return exact("en-us") ?? exact("en-gb") ?? prefix("en-us") ?? prefix("en-gb") ?? english[0] ?? null;
+}
+
+/**
+ * iPhone, iPod, iPad, and iPadOS (which reports as MacIntel with a touch screen).
+ * WebKit drops a speak() that follows cancel() in the same turn, and it only
+ * allows speech inside the user gesture, so iOS must call speak() directly.
+ */
+export function isIOSSpeechDevice(nav: {
+  userAgent: string;
+  platform: string;
+  maxTouchPoints: number;
+}): boolean {
+  if (/iPad|iPhone|iPod/.test(nav.userAgent)) return true;
+  const looksLikeDesktopBrowser = /Chrome|Chromium|CriOS|Edg\/|Firefox/.test(nav.userAgent);
+  return nav.platform === "MacIntel" && nav.maxTouchPoints > 1 && !looksLikeDesktopBrowser;
+}
+
+type SpeakHandlers = {
+  onStart?: () => void;
+  onEnd?: () => void;
+  onError?: (message: string) => void;
+};
+
+let activeUtterance: SpeechSynthesisUtterance | null = null;
+let resumeTimer: ReturnType<typeof setInterval> | null = null;
+let cachedVoices: SpeechSynthesisVoice[] = [];
+let voicesBound = false;
+
+function stopResumeTimer() {
+  if (resumeTimer === null) return;
+  clearInterval(resumeTimer);
+  resumeTimer = null;
+}
+
+function bindVoices(synth: SpeechSynthesis) {
+  const loaded = synth.getVoices();
+  if (loaded.length > 0) cachedVoices = loaded;
+  if (voicesBound) return;
+  voicesBound = true;
+  synth.addEventListener("voiceschanged", () => {
+    cachedVoices = synth.getVoices();
+  });
+}
+
+function ignoredSpeechError(error: string): boolean {
+  return error === "canceled" || error === "interrupted";
+}
+
+export function speakEnglish(text: string, handlers: SpeakHandlers = {}): boolean {
+  const trimmed = text.trim();
+  if (typeof window === "undefined" || !window.speechSynthesis || typeof SpeechSynthesisUtterance === "undefined") {
+    handlers.onError?.(NO_SPEECH);
+    return false;
+  }
+  if (!trimmed) {
+    handlers.onError?.(SPEAK_FAILED);
+    return false;
+  }
+
+  const synth = window.speechSynthesis;
+  bindVoices(synth);
+
+  const utterance = new SpeechSynthesisUtterance(trimmed);
+  activeUtterance = utterance;
   utterance.lang = "en-US";
-  utterance.rate = 0.95;
-  window.speechSynthesis.speak(utterance);
+  utterance.rate = 0.9;
+  const voice = pickEnglishVoice(cachedVoices.length > 0 ? cachedVoices : synth.getVoices());
+  if (voice) utterance.voice = voice;
+
+  const finish = () => {
+    if (activeUtterance !== utterance) return;
+    activeUtterance = null;
+    stopResumeTimer();
+    handlers.onEnd?.();
+  };
+
+  utterance.onend = finish;
+  utterance.onerror = (event) => {
+    if (ignoredSpeechError(event.error)) {
+      finish();
+      return;
+    }
+    if (activeUtterance === utterance) {
+      activeUtterance = null;
+      stopResumeTimer();
+    }
+    handlers.onError?.(SPEAK_FAILED);
+  };
+
+  const ios = isIOSSpeechDevice(navigator);
+  try {
+    if (ios) {
+      synth.speak(utterance);
+    } else {
+      synth.resume();
+      synth.cancel();
+      synth.speak(utterance);
+      synth.resume();
+      stopResumeTimer();
+      resumeTimer = setInterval(() => {
+        if (!synth.speaking) {
+          stopResumeTimer();
+          return;
+        }
+        synth.resume();
+      }, 10000);
+    }
+  } catch {
+    activeUtterance = null;
+    stopResumeTimer();
+    handlers.onError?.(SPEAK_FAILED);
+    return false;
+  }
+
+  handlers.onStart?.();
   return true;
+}
+
+export function useEnglishSpeech() {
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const requestId = useRef(0);
+
+  useEffect(() => {
+    if (!window.speechSynthesis) return;
+    const synth = window.speechSynthesis;
+    const load = () => {
+      cachedVoices = synth.getVoices();
+    };
+    load();
+    synth.addEventListener("voiceschanged", load);
+    return () => synth.removeEventListener("voiceschanged", load);
+  }, []);
+
+  function speak(text: string, key: string) {
+    const id = requestId.current + 1;
+    requestId.current = id;
+    setNotice(null);
+    speakEnglish(text, {
+      onStart: () => setActiveKey(key),
+      onEnd: () => {
+        if (requestId.current !== id) return;
+        setActiveKey(null);
+      },
+      onError: (message) => {
+        if (requestId.current !== id) return;
+        setActiveKey(null);
+        setNotice(message);
+      },
+    });
+  }
+
+  return { speak, activeKey, notice };
 }

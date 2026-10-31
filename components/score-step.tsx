@@ -1,6 +1,6 @@
 import type { ScoreResult } from "@/lib/schemas";
 
-import { speakEnglish } from "@/components/speech";
+import { useEnglishSpeech } from "@/components/speech";
 import { Button, ErrorNote, Panel } from "@/components/ui";
 
 const labels: Record<keyof Omit<ScoreResult, "overallLevel" | "feedbackVi" | "modelSummary">, string> = {
@@ -21,6 +21,7 @@ export function ScoreStep({
   error: string | null;
   onContinue: () => void;
 }) {
+  const speech = useEnglishSpeech();
   const bars = [
     ["contentCoverage", score.contentCoverage],
     ["range", score.range],
@@ -64,10 +65,20 @@ export function ScoreStep({
       <Panel>
         <div className="flex items-start justify-between gap-3">
           <h2 className="font-semibold">Bản tóm tắt mẫu</h2>
-          <Button variant="ghost" onClick={() => speakEnglish(score.modelSummary)}>
-            Nghe
+          <Button
+            variant="ghost"
+            className="shrink-0 min-w-28"
+            aria-pressed={speech.activeKey === "summary"}
+            onClick={() => speech.speak(score.modelSummary, "summary")}
+          >
+            {speech.activeKey === "summary" ? "Đang đọc…" : "Nghe"}
           </Button>
         </div>
+        {speech.notice ? (
+          <div className="mt-3">
+            <ErrorNote message={speech.notice} />
+          </div>
+        ) : null}
         <p className="mt-2 text-sm leading-7 text-stone-800">{score.modelSummary}</p>
       </Panel>
       <div className="flex flex-wrap items-center justify-end gap-3">
