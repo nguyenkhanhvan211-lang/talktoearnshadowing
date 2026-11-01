@@ -1,6 +1,6 @@
 import type { ScoreResult } from "@/lib/schemas";
 
-import { useEnglishSpeech } from "@/components/speech";
+import { AccentToggle, useEnglishSpeech } from "@/components/speech";
 import { Button, ErrorNote, Panel } from "@/components/ui";
 
 const labels: Record<keyof Omit<ScoreResult, "overallLevel" | "feedbackVi" | "modelSummary">, string> = {
@@ -63,7 +63,9 @@ export function ScoreStep({
         <p className="mt-2 text-sm leading-6 text-stone-800">{score.feedbackVi}</p>
       </Panel>
       <Panel>
-        <div className="flex items-start justify-between gap-3">
+        <AccentToggle accent={speech.accent} onChange={speech.setAccent} />
+        {speech.hint ? <p className="mt-2 text-sm text-amber-800">{speech.hint}</p> : null}
+        <div className="mt-3 flex items-start justify-between gap-3">
           <h2 className="font-semibold">Bản tóm tắt mẫu</h2>
           <Button
             variant="ghost"

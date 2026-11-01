@@ -70,9 +70,31 @@ export function createRecognizer(handlers: {
   return recognizer;
 }
 
+export type Accent = "us" | "uk";
+
 export type VoiceLike = {
   lang: string;
   name?: string;
+  localService?: boolean;
+};
+
+export type AccentVoiceChoice<T extends VoiceLike> = {
+  voice: T | null;
+  lang: "en-US" | "en-GB";
+  /** No preferred native voice for this accent. Do not substitute the other locale. */
+  needsHint: boolean;
+};
+
+const ACCENT_STORAGE_KEY = "tte-speech-accent";
+
+const ACCENT_LANG: Record<Accent, "en-US" | "en-GB"> = {
+  us: "en-US",
+  uk: "en-GB",
+};
+
+const PREFERRED_NAMES: Record<Accent, readonly string[]> = {
+  us: ["Google US English", "Samantha", "Alex", "Ava", "Allison"],
+  uk: ["Google UK English Female", "Google UK English Male", "Daniel", "Serena", "Kate", "Arthur"],
 };
 
 const NO_SPEECH =
@@ -80,16 +102,43 @@ const NO_SPEECH =
 const SPEAK_FAILED =
   "Không phát được giọng đọc. Hãy thử lại, hoặc đọc theo chữ trên màn hình.";
 
+function normalizedLang(lang: string): string {
+  return lang.toLowerCase().replaceAll("_", "-");
+}
+
+export function readStoredAccent(storage: { getItem: (key: string) => string | null } | null): Accent {
+  return storage?.getItem(ACCENT_STORAGE_KEY) === "uk" ? "uk" : "us";
+}
+
+export function accentVoiceHint(accent: Accent, foundExactLang: boolean): string {
+  if (accent === "us") {
+    return foundExactLang
+      ? "Thiết bị không có giọng Mỹ chuẩn. Đang đọc bằng giọng en-US có sẵn."
+      : "Thiết bị không có giọng Mỹ (en-US).";
+  }
+  return foundExactLang
+    ? "Thiết bị không có giọng Anh chuẩn. Đang đọc bằng giọng en-GB có sẵn."
+    : "Thiết bị không có giọng Anh (en-GB).";
+}
+
 /**
- * Prefer a US English voice, then British English, then any English voice.
- * An empty list is fine: callers still speak with utterance.lang.
+ * Pick a native voice for one accent only.
+ * Named voices win, then a localService voice of that exact lang, then any exact lang.
+ * Voices of the other locale are never selected.
  */
-export function pickEnglishVoice<T extends VoiceLike>(voices: readonly T[]): T | null {
-  const english = voices.filter((voice) => voice.lang.toLowerCase().startsWith("en"));
-  const exact = (lang: string) => english.find((voice) => voice.lang.toLowerCase() === lang);
-  const prefix = (lang: string) =>
-    english.find((voice) => voice.lang.toLowerCase().startsWith(`${lang}-`) || voice.lang.toLowerCase().startsWith(lang));
-  return exact("en-us") ?? exact("en-gb") ?? prefix("en-us") ?? prefix("en-gb") ?? english[0] ?? null;
+export function pickAccentVoice<T extends VoiceLike>(
+  voices: readonly T[],
+  accent: Accent,
+): AccentVoiceChoice<T> {
+  const lang = ACCENT_LANG[accent];
+  const exact = voices.filter((voice) => normalizedLang(voice.lang) === lang.toLowerCase());
+  const named = PREFERRED_NAMES[accent]
+    .map((name) => exact.find((voice) => (voice.name ?? "").toLowerCase().includes(name.toLowerCase())))
+    .find((voice): voice is T => Boolean(voice));
+  if (named) return { voice: named, lang, needsHint: false };
+  const local = exact.find((voice) => voice.localService);
+  if (local) return { voice: local, lang, needsHint: false };
+  return { voice: exact[0] ?? null, lang, needsHint: true };
 }
 
 /**
@@ -108,9 +157,11 @@ export function isIOSSpeechDevice(nav: {
 }
 
 type SpeakHandlers = {
+  accent?: Accent;
   onStart?: () => void;
   onEnd?: () => void;
   onError?: (message: string) => void;
+  onHint?: (message: string | null) => void;
 };
 
 let activeUtterance: SpeechSynthesisUtterance | null = null;
@@ -152,12 +203,14 @@ export function speakEnglish(text: string, handlers: SpeakHandlers = {}): boolea
   const synth = window.speechSynthesis;
   bindVoices(synth);
 
+  const accent = handlers.accent ?? "us";
+  const choice = pickAccentVoice(cachedVoices.length > 0 ? cachedVoices : synth.getVoices(), accent);
   const utterance = new SpeechSynthesisUtterance(trimmed);
   activeUtterance = utterance;
-  utterance.lang = "en-US";
+  utterance.lang = choice.lang;
   utterance.rate = 0.9;
-  const voice = pickEnglishVoice(cachedVoices.length > 0 ? cachedVoices : synth.getVoices());
-  if (voice) utterance.voice = voice;
+  if (choice.voice) utterance.voice = choice.voice;
+  handlers.onHint?.(choice.needsHint ? accentVoiceHint(accent, choice.voice !== null) : null);
 
   const finish = () => {
     if (activeUtterance !== utterance) return;
@@ -211,24 +264,53 @@ export function speakEnglish(text: string, handlers: SpeakHandlers = {}): boolea
 export function useEnglishSpeech() {
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [accent, setAccentState] = useState<Accent>("us");
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [voicesReady, setVoicesReady] = useState(false);
   const requestId = useRef(0);
+  const choice = pickAccentVoice(voices, accent);
+  const hint = voicesReady && choice.needsHint ? accentVoiceHint(accent, choice.voice !== null) : null;
 
   useEffect(() => {
-    if (!window.speechSynthesis) return;
-    const synth = window.speechSynthesis;
-    const load = () => {
-      cachedVoices = synth.getVoices();
-    };
-    load();
-    synth.addEventListener("voiceschanged", load);
-    return () => synth.removeEventListener("voiceschanged", load);
+    const stored = readStoredAccent(window.localStorage);
+    if (stored !== "us") queueMicrotask(() => setAccentState(stored));
   }, []);
+
+  useEffect(() => {
+    if (!window.speechSynthesis) {
+      queueMicrotask(() => setVoicesReady(true));
+      return;
+    }
+    const synth = window.speechSynthesis;
+    const apply = (ready: boolean) => {
+      const list = synth.getVoices();
+      cachedVoices = list;
+      setVoices(list);
+      if (ready || list.length > 0) setVoicesReady(true);
+    };
+    const onChange = () => apply(true);
+    synth.addEventListener("voiceschanged", onChange);
+    queueMicrotask(() => apply(false));
+    return () => synth.removeEventListener("voiceschanged", onChange);
+  }, []);
+
+  function setAccent(next: Accent) {
+    setAccentState(next);
+    window.localStorage.setItem(ACCENT_STORAGE_KEY, next);
+  }
 
   function speak(text: string, key: string) {
     const id = requestId.current + 1;
     requestId.current = id;
     setNotice(null);
+    if (window.speechSynthesis) {
+      const list = window.speechSynthesis.getVoices();
+      cachedVoices = list;
+      setVoices(list);
+      setVoicesReady(true);
+    }
     speakEnglish(text, {
+      accent,
       onStart: () => setActiveKey(key),
       onEnd: () => {
         if (requestId.current !== id) return;
@@ -242,5 +324,44 @@ export function useEnglishSpeech() {
     });
   }
 
-  return { speak, activeKey, notice };
+  return { speak, activeKey, notice, hint, accent, setAccent };
+}
+
+export function AccentToggle({
+  accent,
+  onChange,
+}: {
+  accent: Accent;
+  onChange: (accent: Accent) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm" role="group" aria-label="Giọng">
+      <span className="font-medium text-stone-700">Giọng:</span>
+      <button
+        type="button"
+        aria-pressed={accent === "us"}
+        onClick={() => onChange("us")}
+        className={accentButtonClass(accent === "us")}
+      >
+        Mỹ (US)
+      </button>
+      <span className="text-stone-400" aria-hidden="true">
+        |
+      </span>
+      <button
+        type="button"
+        aria-pressed={accent === "uk"}
+        onClick={() => onChange("uk")}
+        className={accentButtonClass(accent === "uk")}
+      >
+        Anh (UK)
+      </button>
+    </div>
+  );
+}
+
+function accentButtonClass(selected: boolean): string {
+  return `min-h-9 rounded-full px-3 py-1 font-semibold ${
+    selected ? "bg-teal-800 text-white" : "bg-white text-stone-700 ring-1 ring-stone-200"
+  }`;
 }

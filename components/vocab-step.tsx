@@ -1,6 +1,6 @@
 import type { VocabResult } from "@/lib/schemas";
 
-import { useEnglishSpeech } from "@/components/speech";
+import { AccentToggle, useEnglishSpeech } from "@/components/speech";
 import { Button, ErrorNote, Panel } from "@/components/ui";
 
 export function VocabStep({
@@ -23,6 +23,10 @@ export function VocabStep({
         <p className="mt-1 text-sm text-stone-600">
           {vocab.items.length} mục lấy từ video. Bấm Nghe để nghe phát âm mẫu của trình duyệt.
         </p>
+        <div className="mt-3">
+          <AccentToggle accent={speech.accent} onChange={speech.setAccent} />
+        </div>
+        {speech.hint ? <p className="mt-2 text-sm text-amber-800">{speech.hint}</p> : null}
         {speech.notice ? (
           <div className="mt-3">
             <ErrorNote message={speech.notice} />
