@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: "Be Vietnam Pro", "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(900px 420px at 0% -10%, #d7f3ee 0%, transparent 55%),
+    radial-gradient(700px 380px at 100% 0%, #ffe7d4 0%, transparent 50%),
+    #f6f3ee;
+  color: #1c1917;
+}
+
+:root {
+  color-scheme: light;
+}
